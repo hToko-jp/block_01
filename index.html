@@ -40,20 +40,33 @@
             PLAYING: 1,
             LEVEL_TRANSITION: 2,
             GAME_OVER: 3,
-            VICTORY: 4
+            VICTORY: 4,
+            LIFE_LOST: 5 // ライフ減少時の待機状態を追加
         };
         let currentState = STATE.MENU;
 
+        // ブロックの種類
+        const BLOCK_TYPE = {
+            NORMAL: 0,
+            HARD: 1,  // 2回当てる必要がある
+            BOMB: 2   // 周囲を巻き込む
+        };
+
         // ゲーム変数
         let score = 0;
-        let lives = 3;
+        let lives = 5; 
         let level = 1;
         const maxLevels = 3;
         let animationFrameId;
+        let screenShake = 0; // 画面の揺れ強度
+        let transitionStartTime = 0; // 遷移タイマー用
 
         // オブジェクト
         let paddle = { x: 0, width: 100, height: 15, color: "#0095DD" };
-        let ball = { x: 0, y: 0, dx: 0, dy: 0, radius: 8, speed: 5, active: false };
+        let ball = { 
+            x: 0, y: 0, dx: 0, dy: 0, radius: 8, speed: 5, active: false,
+            trail: [] // 軌跡用座標配列
+        };
         let bricks = []; // ブロック配列 [col][row]
 
         // ブロック設定
@@ -87,7 +100,6 @@
             document.addEventListener("touchmove", touchMoveHandler, { passive: false });
             document.addEventListener("click", inputHandler);
             document.addEventListener("touchstart", (e) => {
-                // タップもクリックと同じ処理へ
                 inputHandler(e);
             });
 
@@ -99,15 +111,12 @@
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
 
-            // パドル幅の調整
             paddle.width = Math.min(Math.max(canvas.width * 0.2, 80), 150);
             
-            // パドル位置の補正
             if (paddle.x + paddle.width > canvas.width) {
                 paddle.x = canvas.width - paddle.width;
             }
 
-            // ブロック幅の再計算
             brickConfig.width = (canvas.width - (brickConfig.offsetLeft * 2) - (brickConfig.padding * (brickConfig.cols - 1))) / brickConfig.cols;
         }
 
@@ -128,7 +137,6 @@
         }
 
         function inputHandler(e) {
-            // 一部ブラウザでのダブル発火防止（touchとclickが両方来る場合など）
             if (e.type === 'touchstart') e.preventDefault(); 
 
             switch (currentState) {
@@ -138,10 +146,10 @@
                     startGame();
                     break;
                 case STATE.LEVEL_TRANSITION:
-                    startLevel();
+                case STATE.LIFE_LOST:
+                    // 自動遷移のためクリック無視
                     break;
                 case STATE.PLAYING:
-                    // プレイ中のクリックは特に何もしない
                     break;
             }
         }
@@ -150,7 +158,7 @@
 
         function startGame() {
             score = 0;
-            lives = 3;
+            lives = 5; 
             level = 1;
             startLevel();
         }
@@ -163,20 +171,41 @@
 
         function createBricks(lvl) {
             bricks = [];
-            const rows = brickConfig.rows + (lvl - 1); // レベルが上がると行が増える
+            const rows = brickConfig.rows + (lvl - 1);
             
             for (let c = 0; c < brickConfig.cols; c++) {
                 bricks[c] = [];
                 for (let r = 0; r < rows; r++) {
                     let status = 1;
-                    // レベルに応じた配置パターン
-                    if (lvl === 2 && (c + r) % 2 === 0) status = 0; // 市松模様
+                    let type = BLOCK_TYPE.NORMAL;
+                    let hp = 1;
+
+                    // レベル2以降: 一定確率でHARDブロック
+                    if (lvl >= 2) {
+                        if (Math.random() < 0.2) {
+                            type = BLOCK_TYPE.HARD;
+                            hp = 2;
+                        }
+                    }
+
+                    // レベル3: 一定確率でBOMBブロック
+                    if (lvl >= 3) {
+                        if (Math.random() < 0.1) {
+                            type = BLOCK_TYPE.BOMB;
+                        }
+                    }
+
+                    // 配置パターン (市松模様など)
+                    if (lvl === 2 && (c + r) % 2 === 0 && type !== BLOCK_TYPE.BOMB) status = 0;
 
                     bricks[c][r] = {
                         x: 0, 
                         y: 0, 
                         status: status, 
-                        color: colors[(c + r * 2) % colors.length]
+                        color: colors[(c + r * 2) % colors.length],
+                        type: type,
+                        hp: hp,
+                        maxHp: hp
                     };
                 }
             }
@@ -189,14 +218,32 @@
             ball.dx = speed * (Math.random() > 0.5 ? 1 : -1);
             ball.dy = -speed;
             ball.active = true;
+            ball.trail = [];
             
             paddle.x = (canvas.width - paddle.width) / 2;
         }
 
         function update() {
+            // シェイク減衰
+            if (screenShake > 0) {
+                screenShake *= 0.9;
+                if (screenShake < 0.5) screenShake = 0;
+            }
+
             if (currentState === STATE.PLAYING) {
                 updateBall();
                 checkLevelClear();
+            } else if (currentState === STATE.LEVEL_TRANSITION) {
+                // 3秒経過したら次のレベルへ
+                if (Date.now() - transitionStartTime > 3000) {
+                    startLevel();
+                }
+            } else if (currentState === STATE.LIFE_LOST) {
+                // 2秒経過したら再開
+                if (Date.now() - transitionStartTime > 2000) {
+                    currentState = STATE.PLAYING;
+                    resetBall();
+                }
             } else if (currentState === STATE.VICTORY) {
                 updateFireworks();
             }
@@ -206,44 +253,59 @@
         function updateBall() {
             if (!ball.active) return;
 
+            // 軌跡の更新
+            ball.trail.push({x: ball.x, y: ball.y});
+            if (ball.trail.length > 10) ball.trail.shift();
+
             ball.x += ball.dx;
             ball.y += ball.dy;
 
-            // 壁判定 (左右)
+            // 壁判定
             if (ball.x + ball.dx > canvas.width - ball.radius || ball.x + ball.dx < ball.radius) {
                 ball.dx = -ball.dx;
+                screenShake = 2; // 壁ヒットで少し揺らす
             }
-            // 壁判定 (上)
             if (ball.y + ball.dy < ball.radius) {
                 ball.dy = -ball.dy;
+                screenShake = 2;
             }
-            // 落下判定 (下)
             else if (ball.y + ball.dy > canvas.height - ball.radius) {
-                // パドル判定
                 if (ball.x > paddle.x && ball.x < paddle.x + paddle.width && ball.y + ball.radius >= canvas.height - paddle.height - 10) {
-                    // パドルにヒット
-                    ball.dy = -Math.abs(ball.dy); // 確実に上に跳ね返す
-                    // 当たった位置で角度変化
+                    ball.dy = -Math.abs(ball.dy);
                     const hitPoint = ball.x - (paddle.x + paddle.width / 2);
                     ball.dx = hitPoint * 0.15;
+                    screenShake = 3; // パドルヒット
+                    
+                    // パドルヒットパーティクル
+                    for(let i=0; i<5; i++) {
+                         particles.push({
+                            x: ball.x, y: canvas.height - paddle.height,
+                            vx: (Math.random()-0.5)*4, vy: Math.random()*-4,
+                            life: 0.5, color: 'white', type: 'spark'
+                         });
+                    }
+
                 } else {
-                    // ミス
                     lives--;
+                    screenShake = 20; // ミス時は大きく揺らす
+                    
                     if (!lives) {
                         currentState = STATE.GAME_OVER;
                         ball.active = false;
                     } else {
-                        resetBall();
+                        // ライフ減少時の状態へ移行
+                        currentState = STATE.LIFE_LOST;
+                        transitionStartTime = Date.now();
+                        ball.active = false; // ボールを止める
                     }
                 }
             }
 
-            // ブロック判定
-            // 安全策: bricks配列が存在しない場合は処理しない
+            // ブロック衝突判定
             if (!bricks || bricks.length === 0) return;
 
             for (let c = 0; c < brickConfig.cols; c++) {
-                if (!bricks[c]) continue; // 安全策
+                if (!bricks[c]) continue;
                 for (let r = 0; r < bricks[c].length; r++) {
                     const b = bricks[c][r];
                     if (b.status === 1) {
@@ -251,10 +313,61 @@
                             ball.y > b.y && ball.y < b.y + brickConfig.height) {
                             
                             ball.dy = -ball.dy;
-                            b.status = 0;
+                            
+                            // ブロックの種類による処理
+                            handleBrickHit(c, r, b);
+                            
+                            return; 
+                        }
+                    }
+                }
+            }
+        }
+
+        function handleBrickHit(c, r, b) {
+            // 耐久力処理
+            if (b.type === BLOCK_TYPE.HARD) {
+                b.hp--;
+                screenShake = 5;
+                // 硬い音っぽいエフェクト（火花）
+                spawnExplosion(ball.x, ball.y, "#aaa", 3);
+                if (b.hp > 0) return; // まだ壊れない
+            }
+
+            // 破壊処理
+            b.status = 0;
+            score++;
+            
+            if (b.type === BLOCK_TYPE.BOMB) {
+                // 爆弾処理
+                screenShake = 20; // 大揺れ
+                score += 5; // ボーナス
+                spawnExplosion(b.x + brickConfig.width/2, b.y + brickConfig.height/2, "#FF3333", 30);
+                triggerBomb(c, r);
+            } else {
+                // 通常破壊
+                screenShake = 5;
+                spawnExplosion(b.x + brickConfig.width/2, b.y + brickConfig.height/2, b.color, 10);
+            }
+        }
+
+        function triggerBomb(col, row) {
+            // 周囲8方向を巻き込む
+            for (let i = -1; i <= 1; i++) {
+                for (let j = -1; j <= 1; j++) {
+                    if (i === 0 && j === 0) continue;
+                    
+                    const targetC = col + i;
+                    const targetR = row + j;
+
+                    if (targetC >= 0 && targetC < brickConfig.cols && 
+                        targetR >= 0 && targetR < bricks[targetC].length) {
+                        
+                        const targetB = bricks[targetC][targetR];
+                        if (targetB.status === 1) {
+                            targetB.status = 0; // 問答無用で破壊
                             score++;
-                            spawnExplosion(b.x + brickConfig.width/2, b.y + brickConfig.height/2, b.color);
-                            return; // 1フレームに1個だけ壊す（貫通防止）
+                            spawnExplosion(targetB.x + brickConfig.width/2, targetB.y + brickConfig.height/2, targetB.color, 5);
                         }
                     }
                 }
@@ -262,7 +375,6 @@
         }
 
         function checkLevelClear() {
-            // ブロックが残っているか確認
             if (!bricks || bricks.length === 0) return;
 
             let cleared = true;
@@ -280,21 +392,22 @@
                     level++;
                     currentState = STATE.LEVEL_TRANSITION;
                     ball.active = false;
+                    transitionStartTime = Date.now(); // タイマー開始
                 } else {
                     currentState = STATE.VICTORY;
                     ball.active = false;
-                    fireworks = []; // 花火初期化
+                    fireworks = []; 
                 }
             }
         }
 
         // --- エフェクト処理 ---
-        function spawnExplosion(x, y, color) {
-            for (let i = 0; i < 10; i++) {
+        function spawnExplosion(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
                 particles.push({
                     x: x, y: y,
-                    vx: (Math.random() - 0.5) * 8,
-                    vy: (Math.random() - 0.5) * 8,
+                    vx: (Math.random() - 0.5) * 10,
+                    vy: (Math.random() - 0.5) * 10,
                     life: 1.0,
                     color: color,
                     type: 'block'
@@ -309,10 +422,9 @@
                 p.y += p.vy;
                 p.life -= 0.03;
                 
-                if (p.type === 'block') {
+                if (p.type === 'block' || p.type === 'spark') {
                     // 重力なし
                 } else {
-                    // 花火用重力
                     p.vy += 0.05;
                     p.vx *= 0.95;
                     p.vy *= 0.95;
@@ -323,7 +435,6 @@
         }
 
         function updateFireworks() {
-            // ランダムに打ち上げ
             if (Math.random() < 0.05) {
                 fireworks.push({
                     x: Math.random() * canvas.width,
@@ -337,10 +448,10 @@
             for (let i = fireworks.length - 1; i >= 0; i--) {
                 let fw = fireworks[i];
                 if (!fw.exploded) {
-                    fw.y -= 8; // 上昇
+                    fw.y -= 8;
                     if (fw.y <= fw.targetY) {
                         fw.exploded = true;
-                        // 爆発パーティクル生成
+                        screenShake = 3; // 花火でも揺らす
                         for (let j = 0; j < 40; j++) {
                             const angle = Math.random() * Math.PI * 2;
                             const speed = Math.random() * 5 + 1;
@@ -362,16 +473,30 @@
         // --- 描画処理 ---
 
         function draw() {
-            // 背景（残像効果なしでクリア）
-            // 花火のときは少し残像を残すと綺麗だが、今回はシンプルにクリア
-            ctx.fillStyle = (currentState === STATE.VICTORY) ? "rgba(0, 0, 0, 0.2)" : "black";
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.save(); // シェイク前の状態保存
 
-            if (currentState === STATE.PLAYING || currentState === STATE.LEVEL_TRANSITION) {
+            // 画面シェイク適用
+            if (screenShake > 0) {
+                const dx = (Math.random() - 0.5) * screenShake;
+                const dy = (Math.random() - 0.5) * screenShake;
+                ctx.translate(dx, dy);
+            }
+
+            // 背景
+            ctx.fillStyle = (currentState === STATE.VICTORY) ? "rgba(0, 0, 0, 0.2)" : "black";
+            ctx.fillRect(0, 0, canvas.width, canvas.height); 
+
+            if (currentState === STATE.PLAYING || currentState === STATE.LEVEL_TRANSITION || currentState === STATE.LIFE_LOST) {
                 drawPaddle();
                 drawBall();
                 drawBricks();
                 drawUI();
+
+                if (currentState === STATE.LEVEL_TRANSITION) {
+                    drawTransitionOverlay();
+                } else if (currentState === STATE.LIFE_LOST) {
+                    drawLifeLostOverlay();
+                }
             } else if (currentState === STATE.MENU) {
                 drawTitleScreen();
             } else if (currentState === STATE.GAME_OVER) {
@@ -381,6 +506,8 @@
             }
 
             drawParticles();
+
+            ctx.restore(); // シェイク解除
         }
 
         function drawPaddle() {
@@ -392,15 +519,33 @@
         }
 
         function drawBall() {
-            ctx.beginPath();
-            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
-            ctx.fillStyle = "white";
-            ctx.fill();
-            ctx.closePath();
+            // トレイル描画
+            if (ball.active && ball.trail.length > 0) {
+                for (let i = 0; i < ball.trail.length; i++) {
+                    const pos = ball.trail[i];
+                    const alpha = (i / ball.trail.length) * 0.5;
+                    const size = ball.radius * (i / ball.trail.length);
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+                    ctx.fill();
+                    ctx.closePath();
+                }
+            }
+            
+            // ボール本体（PLAYING以外でもLIFE_LOSTなどでボールを表示し続ける場合は描画するが、activeがfalseだと更新されない）
+            // LIFE_LOST中はボールが落ちた後なので、描画しないほうが自然、あるいは初期位置に薄く表示するなど。
+            // ここではシンプルにLIFE_LOST中はボールを描画しない（active=falseで更新も停止しているので）
+            if (currentState === STATE.PLAYING || currentState === STATE.LEVEL_TRANSITION) {
+                ctx.beginPath();
+                ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+                ctx.fillStyle = "white";
+                ctx.fill();
+                ctx.closePath();
+            }
         }
 
         function drawBricks() {
-            // 安全策: 配列チェック
             if (!bricks || bricks.length === 0) return;
 
             for (let c = 0; c < brickConfig.cols; c++) {
@@ -408,7 +553,6 @@
                 for (let r = 0; r < bricks[c].length; r++) {
                     const b = bricks[c][r];
                     if (b.status === 1) {
-                        // 描画時に座標計算（レスポンシブ対応のため毎回計算）
                         const brickX = (c * (brickConfig.width + brickConfig.padding)) + brickConfig.offsetLeft;
                         const brickY = (r * (brickConfig.height + brickConfig.padding)) + brickConfig.offsetTop;
                         
@@ -417,8 +561,27 @@
 
                         ctx.beginPath();
                         ctx.roundRect(brickX, brickY, brickConfig.width, brickConfig.height, 3);
-                        ctx.fillStyle = b.color;
-                        ctx.fill();
+                        
+                        if (b.type === BLOCK_TYPE.HARD) {
+                            ctx.fillStyle = b.hp === 1 ? "#666" : "#444"; 
+                            ctx.fill();
+                            ctx.strokeStyle = "#aaa";
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+                        } else if (b.type === BLOCK_TYPE.BOMB) {
+                            const blink = Math.floor(Date.now() / 200) % 2;
+                            ctx.fillStyle = blink ? "#FF0000" : "#880000";
+                            ctx.fill();
+                            ctx.fillStyle = "white";
+                            ctx.font = "bold 12px Arial";
+                            ctx.textAlign = "center";
+                            ctx.fillText("!", brickX + brickConfig.width/2, brickY + 15);
+                            ctx.textAlign = "start";
+                        } else {
+                            ctx.fillStyle = b.color;
+                            ctx.fill();
+                        }
+                        
                         ctx.closePath();
                     }
                 }
@@ -435,7 +598,6 @@
                 ctx.fill();
                 ctx.restore();
             }
-            // 花火の玉
             for (let fw of fireworks) {
                 ctx.fillStyle = `hsl(${fw.hue}, 100%, 50%)`;
                 ctx.beginPath();
@@ -449,7 +611,26 @@
             ctx.font = "16px sans-serif";
             ctx.fillText("Score: " + score, 10, 25);
             ctx.fillText("Level: " + level, canvas.width / 2 - 20, 25);
-            ctx.fillText("Lives: " + lives, canvas.width - 70, 25);
+            
+            // ライフをハートアイコンで描画
+            for (let i = 0; i < lives; i++) {
+                // 右上から左に向かって並べる
+                drawHeart(canvas.width - 20 - (i * 25), 20, 10, "#FF355E");
+            }
+        }
+
+        // ハートを描画する関数
+        function drawHeart(x, y, size, color) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            // ハートの形状を描画
+            ctx.moveTo(0, -size / 4);
+            ctx.bezierCurveTo(-size / 2, -size, -size * 1.5, -size / 4, 0, size);
+            ctx.bezierCurveTo(size * 1.5, -size / 4, size / 2, -size, 0, -size / 4);
+            ctx.fill();
+            ctx.restore();
         }
 
         function drawTitleScreen() {
@@ -460,6 +641,11 @@
             ctx.font = "20px sans-serif";
             ctx.fillStyle = "#ccc";
             ctx.fillText("Click to Start", canvas.width / 2, canvas.height / 2 + 30);
+            
+            ctx.font = "14px sans-serif";
+            ctx.fillStyle = "#888";
+            ctx.fillText("Red Blink = Bomb, Dark Grey = Hard", canvas.width / 2, canvas.height / 2 + 80);
+
             ctx.textAlign = "start";
         }
 
@@ -475,7 +661,6 @@
         }
 
         function drawVictory() {
-            // テキスト
             ctx.save();
             ctx.shadowColor = "white";
             ctx.shadowBlur = 15;
@@ -492,15 +677,44 @@
             ctx.restore();
             ctx.textAlign = "start";
         }
+        
+        function drawTransitionOverlay() {
+            // 背景を少し暗く
+            ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.save();
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.font = "bold 30px sans-serif";
+            ctx.fillText(`LEVEL ${level-1} CLEAR!`, canvas.width / 2, canvas.height / 2 - 20);
+            
+            ctx.font = "20px sans-serif";
+            ctx.fillStyle = "#ddd";
+            ctx.fillText(`NEXT LEVEL STARTING...`, canvas.width / 2, canvas.height / 2 + 30);
+            ctx.restore();
+        }
 
-        // --- メインループ ---
+        function drawLifeLostOverlay() {
+            ctx.save();
+            ctx.fillStyle = "rgba(255, 0, 0, 0.3)"; // 赤っぽい警告色
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.font = "bold 40px sans-serif";
+            ctx.fillText("MISS!", canvas.width / 2, canvas.height / 2);
+            ctx.font = "20px sans-serif";
+            ctx.fillText("Get Ready...", canvas.width / 2, canvas.height / 2 + 40);
+            ctx.restore();
+        }
+
         function loop() {
             update();
             draw();
             animationFrameId = requestAnimationFrame(loop);
         }
 
-        // 実行開始
         init();
 
     })();
