@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Colorful Block Breaker</title>
+    <style>
+        * {
+            padding: 0;
+            margin: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background-color: #111;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none; /* スマホでのスクロール防止 */
+            color: white;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    (function() {
+        // --- 設定と変数 ---
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        // ゲームの状態管理
+        const STATE = {
+            MENU: 0,
+            PLAYING: 1,
+            LEVEL_TRANSITION: 2,
+            GAME_OVER: 3,
+            VICTORY: 4
+        };
+        let currentState = STATE.MENU;
+
+        // ゲーム変数
+        let score = 0;
+        let lives = 3;
+        let level = 1;
+        const maxLevels = 3;
+        let animationFrameId;
+
+        // オブジェクト
+        let paddle = { x: 0, width: 100, height: 15, color: "#0095DD" };
+        let ball = { x: 0, y: 0, dx: 0, dy: 0, radius: 8, speed: 5, active: false };
+        let bricks = []; // ブロック配列 [col][row]
+
+        // ブロック設定
+        const brickConfig = {
+            rows: 4,
+            cols: 7,
+            padding: 10,
+            offsetTop: 60,
+            offsetLeft: 30,
+            width: 0,
+            height: 20
+        };
+
+        // エフェクト用
+        let particles = [];
+        let fireworks = [];
+
+        // カラーパレット
+        const colors = [
+            "#FF355E", "#FD5B78", "#FF6037", "#FF9966", "#FFCC33", 
+            "#FFFF66", "#CCFF00", "#66FF66", "#50BFE6", "#FF00CC", "#BF00FF"
+        ];
+
+        // --- 初期化とリサイズ ---
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // 入力イベント
+            document.addEventListener("mousemove", mouseMoveHandler);
+            document.addEventListener("touchmove", touchMoveHandler, { passive: false });
+            document.addEventListener("click", inputHandler);
+            document.addEventListener("touchstart", (e) => {
+                // タップもクリックと同じ処理へ
+                inputHandler(e);
+            });
+
+            // ループ開始
+            loop();
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            // パドル幅の調整
+            paddle.width = Math.min(Math.max(canvas.width * 0.2, 80), 150);
+            
+            // パドル位置の補正
+            if (paddle.x + paddle.width > canvas.width) {
+                paddle.x = canvas.width - paddle.width;
+            }
+
+            // ブロック幅の再計算
+            brickConfig.width = (canvas.width - (brickConfig.offsetLeft * 2) - (brickConfig.padding * (brickConfig.cols - 1))) / brickConfig.cols;
+        }
+
+        // --- 入力ハンドラ ---
+        function mouseMoveHandler(e) {
+            const relativeX = e.clientX - canvas.offsetLeft;
+            if (relativeX > 0 && relativeX < canvas.width) {
+                paddle.x = relativeX - paddle.width / 2;
+            }
+        }
+
+        function touchMoveHandler(e) {
+            e.preventDefault();
+            const relativeX = e.touches[0].clientX - canvas.offsetLeft;
+            if (relativeX > 0 && relativeX < canvas.width) {
+                paddle.x = relativeX - paddle.width / 2;
+            }
+        }
+
+        function inputHandler(e) {
+            // 一部ブラウザでのダブル発火防止（touchとclickが両方来る場合など）
+            if (e.type === 'touchstart') e.preventDefault(); 
+
+            switch (currentState) {
+                case STATE.MENU:
+                case STATE.GAME_OVER:
+                case STATE.VICTORY:
+                    startGame();
+                    break;
+                case STATE.LEVEL_TRANSITION:
+                    startLevel();
+                    break;
+                case STATE.PLAYING:
+                    // プレイ中のクリックは特に何もしない
+                    break;
+            }
+        }
+
+        // --- ゲームロジック ---
+
+        function startGame() {
+            score = 0;
+            lives = 3;
+            level = 1;
+            startLevel();
+        }
+
+        function startLevel() {
+            currentState = STATE.PLAYING;
+            createBricks(level);
+            resetBall();
+        }
+
+        function createBricks(lvl) {
+            bricks = [];
+            const rows = brickConfig.rows + (lvl - 1); // レベルが上がると行が増える
+            
+            for (let c = 0; c < brickConfig.cols; c++) {
+                bricks[c] = [];
+                for (let r = 0; r < rows; r++) {
+                    let status = 1;
+                    // レベルに応じた配置パターン
+                    if (lvl === 2 && (c + r) % 2 === 0) status = 0; // 市松模様
+
+                    bricks[c][r] = {
+                        x: 0, 
+                        y: 0, 
+                        status: status, 
+                        color: colors[(c + r * 2) % colors.length]
+                    };
+                }
+            }
+        }
+
+        function resetBall() {
+            ball.x = canvas.width / 2;
+            ball.y = canvas.height - 40;
+            const speed = ball.speed + (level * 0.5);
+            ball.dx = speed * (Math.random() > 0.5 ? 1 : -1);
+            ball.dy = -speed;
+            ball.active = true;
+            
+            paddle.x = (canvas.width - paddle.width) / 2;
+        }
+
+        function update() {
+            if (currentState === STATE.PLAYING) {
+                updateBall();
+                checkLevelClear();
+            } else if (currentState === STATE.VICTORY) {
+                updateFireworks();
+            }
+            updateParticles();
+        }
+
+        function updateBall() {
+            if (!ball.active) return;
+
+            ball.x += ball.dx;
+            ball.y += ball.dy;
+
+            // 壁判定 (左右)
+            if (ball.x + ball.dx > canvas.width - ball.radius || ball.x + ball.dx < ball.radius) {
+                ball.dx = -ball.dx;
+            }
+            // 壁判定 (上)
+            if (ball.y + ball.dy < ball.radius) {
+                ball.dy = -ball.dy;
+            }
+            // 落下判定 (下)
+            else if (ball.y + ball.dy > canvas.height - ball.radius) {
+                // パドル判定
+                if (ball.x > paddle.x && ball.x < paddle.x + paddle.width && ball.y + ball.radius >= canvas.height - paddle.height - 10) {
+                    // パドルにヒット
+                    ball.dy = -Math.abs(ball.dy); // 確実に上に跳ね返す
+                    // 当たった位置で角度変化
+                    const hitPoint = ball.x - (paddle.x + paddle.width / 2);
+                    ball.dx = hitPoint * 0.15;
+                } else {
+                    // ミス
+                    lives--;
+                    if (!lives) {
+                        currentState = STATE.GAME_OVER;
+                        ball.active = false;
+                    } else {
+                        resetBall();
+                    }
+                }
+            }
+
+            // ブロック判定
+            // 安全策: bricks配列が存在しない場合は処理しない
+            if (!bricks || bricks.length === 0) return;
+
+            for (let c = 0; c < brickConfig.cols; c++) {
+                if (!bricks[c]) continue; // 安全策
+                for (let r = 0; r < bricks[c].length; r++) {
+                    const b = bricks[c][r];
+                    if (b.status === 1) {
+                        if (ball.x > b.x && ball.x < b.x + brickConfig.width && 
+                            ball.y > b.y && ball.y < b.y + brickConfig.height) {
+                            
+                            ball.dy = -ball.dy;
+                            b.status = 0;
+                            score++;
+                            spawnExplosion(b.x + brickConfig.width/2, b.y + brickConfig.height/2, b.color);
+                            return; // 1フレームに1個だけ壊す（貫通防止）
+                        }
+                    }
+                }
+            }
+        }
+
+        function checkLevelClear() {
+            // ブロックが残っているか確認
+            if (!bricks || bricks.length === 0) return;
+
+            let cleared = true;
+            for (let c = 0; c < brickConfig.cols; c++) {
+                for (let r = 0; r < bricks[c].length; r++) {
+                    if (bricks[c][r].status === 1) {
+                        cleared = false;
+                        break;
+                    }
+                }
+            }
+
+            if (cleared) {
+                if (level < maxLevels) {
+                    level++;
+                    currentState = STATE.LEVEL_TRANSITION;
+                    ball.active = false;
+                } else {
+                    currentState = STATE.VICTORY;
+                    ball.active = false;
+                    fireworks = []; // 花火初期化
+                }
+            }
+        }
+
+        // --- エフェクト処理 ---
+        function spawnExplosion(x, y, color) {
+            for (let i = 0; i < 10; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 8,
+                    vy: (Math.random() - 0.5) * 8,
+                    life: 1.0,
+                    color: color,
+                    type: 'block'
+                });
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.03;
+                
+                if (p.type === 'block') {
+                    // 重力なし
+                } else {
+                    // 花火用重力
+                    p.vy += 0.05;
+                    p.vx *= 0.95;
+                    p.vy *= 0.95;
+                }
+
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+        }
+
+        function updateFireworks() {
+            // ランダムに打ち上げ
+            if (Math.random() < 0.05) {
+                fireworks.push({
+                    x: Math.random() * canvas.width,
+                    y: canvas.height,
+                    targetY: Math.random() * (canvas.height / 2),
+                    hue: Math.random() * 360,
+                    exploded: false
+                });
+            }
+
+            for (let i = fireworks.length - 1; i >= 0; i--) {
+                let fw = fireworks[i];
+                if (!fw.exploded) {
+                    fw.y -= 8; // 上昇
+                    if (fw.y <= fw.targetY) {
+                        fw.exploded = true;
+                        // 爆発パーティクル生成
+                        for (let j = 0; j < 40; j++) {
+                            const angle = Math.random() * Math.PI * 2;
+                            const speed = Math.random() * 5 + 1;
+                            particles.push({
+                                x: fw.x, y: fw.y,
+                                vx: Math.cos(angle) * speed,
+                                vy: Math.sin(angle) * speed,
+                                life: 1.0,
+                                color: `hsl(${fw.hue}, 100%, 50%)`,
+                                type: 'firework'
+                            });
+                        }
+                        fireworks.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        // --- 描画処理 ---
+
+        function draw() {
+            // 背景（残像効果なしでクリア）
+            // 花火のときは少し残像を残すと綺麗だが、今回はシンプルにクリア
+            ctx.fillStyle = (currentState === STATE.VICTORY) ? "rgba(0, 0, 0, 0.2)" : "black";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (currentState === STATE.PLAYING || currentState === STATE.LEVEL_TRANSITION) {
+                drawPaddle();
+                drawBall();
+                drawBricks();
+                drawUI();
+            } else if (currentState === STATE.MENU) {
+                drawTitleScreen();
+            } else if (currentState === STATE.GAME_OVER) {
+                drawGameOver();
+            } else if (currentState === STATE.VICTORY) {
+                drawVictory();
+            }
+
+            drawParticles();
+        }
+
+        function drawPaddle() {
+            ctx.beginPath();
+            ctx.roundRect(paddle.x, canvas.height - paddle.height - 10, paddle.width, paddle.height, 5);
+            ctx.fillStyle = paddle.color;
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function drawBall() {
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fillStyle = "white";
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function drawBricks() {
+            // 安全策: 配列チェック
+            if (!bricks || bricks.length === 0) return;
+
+            for (let c = 0; c < brickConfig.cols; c++) {
+                if (!bricks[c]) continue;
+                for (let r = 0; r < bricks[c].length; r++) {
+                    const b = bricks[c][r];
+                    if (b.status === 1) {
+                        // 描画時に座標計算（レスポンシブ対応のため毎回計算）
+                        const brickX = (c * (brickConfig.width + brickConfig.padding)) + brickConfig.offsetLeft;
+                        const brickY = (r * (brickConfig.height + brickConfig.padding)) + brickConfig.offsetTop;
+                        
+                        b.x = brickX;
+                        b.y = brickY;
+
+                        ctx.beginPath();
+                        ctx.roundRect(brickX, brickY, brickConfig.width, brickConfig.height, 3);
+                        ctx.fillStyle = b.color;
+                        ctx.fill();
+                        ctx.closePath();
+                    }
+                }
+            }
+        }
+
+        function drawParticles() {
+            for (let p of particles) {
+                ctx.save();
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.type === 'firework' ? 2 : 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+            // 花火の玉
+            for (let fw of fireworks) {
+                ctx.fillStyle = `hsl(${fw.hue}, 100%, 50%)`;
+                ctx.beginPath();
+                ctx.arc(fw.x, fw.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawUI() {
+            ctx.fillStyle = "white";
+            ctx.font = "16px sans-serif";
+            ctx.fillText("Score: " + score, 10, 25);
+            ctx.fillText("Level: " + level, canvas.width / 2 - 20, 25);
+            ctx.fillText("Lives: " + lives, canvas.width - 70, 25);
+        }
+
+        function drawTitleScreen() {
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.font = "bold 40px sans-serif";
+            ctx.fillText("BLOCK BREAKER", canvas.width / 2, canvas.height / 2 - 20);
+            ctx.font = "20px sans-serif";
+            ctx.fillStyle = "#ccc";
+            ctx.fillText("Click to Start", canvas.width / 2, canvas.height / 2 + 30);
+            ctx.textAlign = "start";
+        }
+
+        function drawGameOver() {
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.font = "bold 40px sans-serif";
+            ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 20);
+            ctx.font = "20px sans-serif";
+            ctx.fillStyle = "#ccc";
+            ctx.fillText("Click to Retry", canvas.width / 2, canvas.height / 2 + 30);
+            ctx.textAlign = "start";
+        }
+
+        function drawVictory() {
+            // テキスト
+            ctx.save();
+            ctx.shadowColor = "white";
+            ctx.shadowBlur = 15;
+            ctx.fillStyle = `hsl(${Date.now() % 360}, 100%, 70%)`;
+            ctx.textAlign = "center";
+            ctx.font = "bold 50px sans-serif";
+            ctx.fillText("CONGRATULATIONS!", canvas.width / 2, canvas.height / 2);
+            ctx.shadowBlur = 0;
+            
+            ctx.fillStyle = "white";
+            ctx.font = "20px sans-serif";
+            ctx.fillText("Final Score: " + score, canvas.width / 2, canvas.height / 2 + 60);
+            ctx.fillText("Click to Play Again", canvas.width / 2, canvas.height / 2 + 100);
+            ctx.restore();
+            ctx.textAlign = "start";
+        }
+
+        // --- メインループ ---
+        function loop() {
+            update();
+            draw();
+            animationFrameId = requestAnimationFrame(loop);
+        }
+
+        // 実行開始
+        init();
+
+    })();
+</script>
+</body>
+</html>
